@@ -36,6 +36,7 @@ explore the repository, make the necessary code changes, and verify they work co
 
 ## Rules
 - Think step by step before each action (use the thought field)
+- To change an existing file, use file_edit (replace a unique snippet); only use file_write for new files or full rewrites
 - After editing files, always run tests to verify your changes
 - If tests fail, read the error carefully and fix the root cause, not the symptom
 - If you are stuck after several attempts, reflect on your approach and try differently

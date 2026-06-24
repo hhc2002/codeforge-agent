@@ -1,15 +1,17 @@
 """
 tools/file_tool.py
 
-文件操作工具，提供三个 action：
+文件操作工具，提供四个 action：
 - file_read:   读取文件全部内容
 - file_view:   分窗口查看文件（防止一次读爆上下文）
 - file_write:  写入文件（全量覆盖）
+- file_edit:   外科式编辑（唯一片段 str_replace，其余内容原样保留）
 
 设计原则：
 - file_read 对大文件做行数截断，超出时提示用 file_view 分页
 - file_view 维护"窗口"概念，每次返回固定行数，agent 可 scroll
 - file_write 写入前自动创建父目录，写入后返回行数确认
+- file_edit 只动指定片段，靠"唯一性校验"避免误删无关内容——改已有文件首选
 - 所有路径都限制在 repo_path 内（防止读取系统文件）
 """
 
@@ -198,6 +200,9 @@ class FileWriteTool(BaseTool):
         return (
             "Write content to a file, replacing its entire contents. "
             "Parent directories are created automatically. "
+            "Use this for creating new files or full rewrites; to modify an "
+            "existing file prefer file_edit, which replaces only the target "
+            "snippet and cannot accidentally drop unrelated content. "
             "Always read the file first before writing to avoid losing existing content."
         )
 
@@ -232,4 +237,142 @@ class FileWriteTool(BaseTool):
         return ToolResult(
             success=True,
             output=f"Written {line_count} lines to {path}",
+        )
+
+
+class FileEditTool(BaseTool):
+    """
+    外科式编辑：把文件中**唯一一处** old_string 替换为 new_string。
+
+    与 file_write（整文件覆盖）相反，file_edit 只动你指定的片段，其余内容
+    原样保留——改已有文件时优先用它，更安全（不会误删无关代码）、更省 token。
+
+    唯一性校验（安全保证）：
+        - old_string 必须逐字符匹配（含缩进），且在文件中恰好出现一次；
+        - 出现 0 次 → 报错，提示先 file_read 确认原文；
+        - 出现 >1 次 → 报错，要求带上更多上下文使其唯一。
+
+    params:
+        path (str):       要编辑的文件路径（必须已存在）
+        old_string (str): 被替换的原文片段（含缩进，逐字符匹配）
+        new_string (str): 替换后的新内容（传空串表示删除该片段）
+    """
+
+    @property
+    def name(self) -> str:
+        return "file_edit"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Make a surgical edit to an EXISTING file by replacing a unique "
+            "snippet of text, leaving the rest of the file untouched. Prefer this "
+            "over file_write when modifying existing files — it cannot accidentally "
+            "drop unrelated content and uses far fewer tokens. `old_string` must "
+            "match the file exactly (including indentation) and appear EXACTLY ONCE; "
+            "include enough surrounding context to make it unique. Set `new_string` "
+            "to an empty string to delete the snippet."
+        )
+
+    @property
+    def parameters_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the existing file to edit",
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": (
+                        "Exact text to replace, including indentation. "
+                        "Must appear exactly once in the file."
+                    ),
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "Replacement text. Use an empty string to delete old_string.",
+                },
+            },
+            "required": ["path", "old_string", "new_string"],
+        }
+
+    def execute(self, params: dict[str, Any]) -> ToolResult:
+        path = Path(params.get("path", ""))
+        old_string = params.get("old_string", "")
+        new_string = params.get("new_string", "")
+
+        if not path.exists():
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"File not found: {path}. Use file_write to create a new file.",
+            )
+        if not path.is_file():
+            return ToolResult(success=False, output="", error=f"Not a file: {path}")
+        if old_string == "":
+            return ToolResult(
+                success=False,
+                output="",
+                error=(
+                    "old_string is empty. Use file_write to create a file; "
+                    "for an edit, provide the exact text to replace."
+                ),
+            )
+        if old_string == new_string:
+            return ToolResult(
+                success=False,
+                output="",
+                error="old_string and new_string are identical — nothing to change.",
+            )
+
+        try:
+            content = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"Cannot edit binary or non-UTF-8 file: {path}",
+            )
+        except OSError as e:
+            return ToolResult(success=False, output="", error=str(e))
+
+        count = content.count(old_string)
+        if count == 0:
+            return ToolResult(
+                success=False,
+                output="",
+                error=(
+                    "old_string not found. It must match exactly, including "
+                    "whitespace and indentation. Use file_read to see the current "
+                    "content, then copy the snippet verbatim."
+                ),
+            )
+        if count > 1:
+            return ToolResult(
+                success=False,
+                output="",
+                error=(
+                    f"old_string is not unique — found {count} occurrences. "
+                    "Include more surrounding context so it matches exactly one location."
+                ),
+            )
+
+        new_content = content.replace(old_string, new_string, 1)
+        try:
+            path.write_text(new_content, encoding="utf-8")
+        except OSError as e:
+            return ToolResult(success=False, output="", error=str(e))
+
+        # 报告改动位置与规模，方便 agent 确认这次编辑落在预期处
+        start_line = content[: content.index(old_string)].count("\n") + 1
+        removed = old_string.count("\n") + 1
+        added = new_string.count("\n") + 1 if new_string else 0
+        return ToolResult(
+            success=True,
+            output=(
+                f"Edited {path} at line {start_line}: "
+                f"replaced {removed} line(s) with {added} line(s)."
+            ),
         )

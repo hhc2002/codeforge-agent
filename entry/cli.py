@@ -65,7 +65,7 @@ def magenta(t: str) -> str: return _c(t, "35")
 def _build_registry(cfg, confirm_callback=None, runtime=None):
     """根据配置组装工具注册表。"""
     from tools.base import ToolRegistry
-    from tools.file_tool import FileReadTool, FileViewTool, FileWriteTool
+    from tools.file_tool import FileEditTool, FileReadTool, FileViewTool, FileWriteTool
     from tools.git_tool import GitAddTool, GitCommitTool, GitDiffTool, GitStatusTool
     from tools.search_tool import FindFilesTool, FindSymbolTool, SearchTextTool
     from tools.shell_tool import ShellTool
@@ -77,6 +77,7 @@ def _build_registry(cfg, confirm_callback=None, runtime=None):
         .register(FileReadTool())
         .register(FileViewTool())
         .register(FileWriteTool())
+        .register(FileEditTool())
         .register(SearchTextTool())
         .register(FindFilesTool())
         .register(FindSymbolTool())
@@ -144,7 +145,7 @@ def _print_step(event) -> None:
 # CLI 主命令组
 # ---------------------------------------------------------------------------
 
-@click.group()
+@click.group(invoke_without_command=True)
 @click.option(
     "--config", "-c",
     default=None,
@@ -152,9 +153,15 @@ def _print_step(event) -> None:
 )
 @click.pass_context
 def cli(ctx: click.Context, config: str | None) -> None:
-    """Coding Agent — autonomous code editing and bug fixing."""
+    """Coding Agent — autonomous code editing and bug fixing.
+
+    不带子命令直接运行 `agent` 时，默认进入交互式 chat 模式。
+    """
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = config
+    # 裸 `agent`（无子命令）→ 默认启动交互式 chat，用 config 里的默认 provider/model
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(chat)
 
 
 # ---------------------------------------------------------------------------

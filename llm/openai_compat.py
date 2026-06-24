@@ -442,13 +442,21 @@ def _stream_with_tools(self, api_messages, tools, on_text, on_thought=None):
         # tool call delta 拼接
         if delta.tool_calls:
             for tc_delta in delta.tool_calls:
+                fn = getattr(tc_delta, "function", None)
                 idx = tc_delta.index
-                while len(tool_calls_raw) <= idx:
-                    tool_calls_raw.append({"name": "", "arguments": ""})
-                if tc_delta.function.name:
-                    tool_calls_raw[idx]["name"] += tc_delta.function.name
-                if tc_delta.function.arguments:
-                    tool_calls_raw[idx]["arguments"] += tc_delta.function.arguments
+                if idx is None:
+                    # 某些 OpenAI 兼容端点（如 Gemini）流式分片里不带 index：
+                    # 带 name 的分片视为一次新的 tool call，否则并入最后一个
+                    if (fn and fn.name) or not tool_calls_raw:
+                        tool_calls_raw.append({"name": "", "arguments": ""})
+                    idx = len(tool_calls_raw) - 1
+                else:
+                    while len(tool_calls_raw) <= idx:
+                        tool_calls_raw.append({"name": "", "arguments": ""})
+                if fn and fn.name:
+                    tool_calls_raw[idx]["name"] += fn.name
+                if fn and fn.arguments:
+                    tool_calls_raw[idx]["arguments"] += fn.arguments
 
     # 构造 mock choice 供 _parse_openai_response 复用
     import json as _json

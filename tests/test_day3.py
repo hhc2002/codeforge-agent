@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.file_tool import FileReadTool, FileViewTool, FileWriteTool
+from tools.file_tool import FileEditTool, FileReadTool, FileViewTool, FileWriteTool
 from tools.git_tool import GitAddTool, GitCommitTool, GitDiffTool, GitStatusTool
 from tools.search_tool import FindFilesTool, FindSymbolTool, SearchTextTool
 from tools.shell_tool import ShellTool, _check_blocked, _truncate
@@ -178,6 +178,100 @@ class TestFileWriteTool:
         result = self.tool.execute({"path": str(path), "content": ""})
         assert result.success
         assert path.read_text() == ""
+
+
+# ===========================================================================
+# FileEditTool
+# ===========================================================================
+
+class TestFileEditTool:
+    tool = FileEditTool()
+
+    def _make(self, tmp_path, content="def f():\n    return 1\n"):
+        path = tmp_path / "edit.py"
+        path.write_text(content)
+        return path
+
+    def test_replace_unique_snippet(self, tmp_path):
+        path = self._make(tmp_path)
+        result = self.tool.execute(
+            {"path": str(path), "old_string": "return 1", "new_string": "return 2"}
+        )
+        assert result.success
+        assert path.read_text() == "def f():\n    return 2\n"
+
+    def test_leaves_rest_untouched(self, tmp_path):
+        path = self._make(tmp_path, "a = 1\nb = 2\nc = 3\n")
+        self.tool.execute({"path": str(path), "old_string": "b = 2", "new_string": "b = 20"})
+        assert path.read_text() == "a = 1\nb = 20\nc = 3\n"
+
+    def test_delete_snippet_with_empty_new_string(self, tmp_path):
+        path = self._make(tmp_path, "keep\nDROP ME\nkeep2\n")
+        result = self.tool.execute(
+            {"path": str(path), "old_string": "DROP ME\n", "new_string": ""}
+        )
+        assert result.success
+        assert path.read_text() == "keep\nkeep2\n"
+
+    def test_not_found_fails(self, tmp_path):
+        path = self._make(tmp_path)
+        result = self.tool.execute(
+            {"path": str(path), "old_string": "nonexistent", "new_string": "x"}
+        )
+        assert not result.success
+        assert "not found" in result.error.lower()
+
+    def test_non_unique_fails(self, tmp_path):
+        path = self._make(tmp_path, "x = 1\nx = 1\n")
+        result = self.tool.execute(
+            {"path": str(path), "old_string": "x = 1", "new_string": "x = 2"}
+        )
+        assert not result.success
+        assert "2 occurrences" in result.error
+        # 文件未被改动
+        assert path.read_text() == "x = 1\nx = 1\n"
+
+    def test_nonexistent_file_fails(self, tmp_path):
+        result = self.tool.execute(
+            {"path": str(tmp_path / "nope.py"), "old_string": "a", "new_string": "b"}
+        )
+        assert not result.success
+        assert "not found" in result.error.lower()
+
+    def test_empty_old_string_fails(self, tmp_path):
+        path = self._make(tmp_path)
+        result = self.tool.execute(
+            {"path": str(path), "old_string": "", "new_string": "x"}
+        )
+        assert not result.success
+
+    def test_identical_strings_fails(self, tmp_path):
+        path = self._make(tmp_path)
+        result = self.tool.execute(
+            {"path": str(path), "old_string": "return 1", "new_string": "return 1"}
+        )
+        assert not result.success
+        assert "identical" in result.error.lower()
+
+    def test_indentation_must_match(self, tmp_path):
+        path = self._make(tmp_path)
+        # 原文是 "    return 1"（4 空格缩进），不带缩进应匹配不到整行替换语义
+        result = self.tool.execute(
+            {"path": str(path), "old_string": "    return 1\n", "new_string": "    return 42\n"}
+        )
+        assert result.success
+        assert path.read_text() == "def f():\n    return 42\n"
+
+    def test_reports_line_number(self, tmp_path):
+        path = self._make(tmp_path, "l1\nl2\nTARGET\nl4\n")
+        result = self.tool.execute(
+            {"path": str(path), "old_string": "TARGET", "new_string": "DONE"}
+        )
+        assert "line 3" in result.output
+
+    def test_schema_valid(self):
+        schema = self.tool.parameters_schema
+        assert schema["required"] == ["path", "old_string", "new_string"]
 
 
 # ===========================================================================

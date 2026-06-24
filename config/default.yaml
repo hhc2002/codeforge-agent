@@ -1,8 +1,8 @@
 llm:
-  provider: deepseek
-  model: deepseek-v4-flash # 或 deepseek-v4-pro
-  api_key: ${DEEPSEEK_API_KEY} # 在终端 export DEEPSEEK_API_KEY=你的key
-  base_url: https://api.deepseek.com
+  provider: gemini
+  model: gemini-2.5-flash # 稳定可用；gemini-3.5-flash 当前常 503，可用 -m 临时切
+  api_key: ${GEMINI_API_KEY} # 在终端 export GEMINI_API_KEY=你的key
+  base_url: # 留空：自动用 Gemini 的 OpenAI 兼容端点（见 llm/router.py）
   max_tokens: 8192
 
 agent:
