@@ -2,7 +2,7 @@
 
 自主编程智能体。给它一个任务描述，它会自己探索代码库、修改文件、运行测试，直到完成。
 
-支持 **Claude、DeepSeek、OpenAI、Groq、Ollama** 多种模型，内置流式输出、Docker 沙箱、GitHub Issue 自动修复。
+默认使用 **Gemini**，同时支持 **Claude、OpenAI、DeepSeek、Groq、Ollama**。内置 tree-sitter repo-map、外科式文件编辑（file_edit）、流式输出、Docker 沙箱、Reflection 自纠错、GitHub Issue 自动修复，并附可复现评测 harness。
 
 ---
 
@@ -10,19 +10,19 @@
 
 ```bash
 # 安装
-git clone <repo-url> && cd coding-agent
+git clone <repo-url> && cd codeforge-agent
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 配置（编辑 config/default.yaml，填入 provider 和 api_key）
-export DEEPSEEK_API_KEY=sk-xxx   # 或 ANTHROPIC_API_KEY / OPENAI_API_KEY
+# 配置 API key（默认走 Gemini）
+export GEMINI_API_KEY=AIza...    # 或 ANTHROPIC_API_KEY / OPENAI_API_KEY / DEEPSEEK_API_KEY
 
 # 验证
 python smoke_test.py
 
-# 使用
+# 使用：进入项目目录，直接运行 agent
 cd your-project
-agent chat
+agent                            # 不带子命令即进入交互式 chat
 ```
 
 ---
@@ -31,12 +31,12 @@ agent chat
 
 ### chat 模式（推荐）
 
-持续对话，每轮历史保留，最接近 Claude Code 的体验：
+持续对话，每轮历史保留，最接近 Claude Code 的体验。**不带子命令直接运行 `agent` 即进入 chat**：
 
 ```bash
-agent chat                            # 当前目录
-agent chat --repo /path/to/project   # 指定目录
-agent chat --model deepseek-v4-pro   # 切换模型
+agent                                 # 等价于 agent chat（当前目录）
+agent chat --repo /path/to/project    # 指定目录
+agent chat --model gemini-2.5-pro     # 切换模型（默认 gemini-2.5-flash）
 agent chat --sandbox                  # Docker 沙箱
 ```
 
@@ -71,10 +71,10 @@ python -m entry.github_issue \
 
 ```yaml
 llm:
-  provider: deepseek                      # anthropic | openai | deepseek | groq | ollama
-  model: deepseek-v4-flash
-  api_key: ${DEEPSEEK_API_KEY}            # 从环境变量读取
-  base_url: https://api.deepseek.com      # OpenAI-compatible 时填写，anthropic 留空
+  provider: gemini                        # gemini | anthropic | openai | deepseek | groq | ollama
+  model: gemini-2.5-flash                 # 默认；gemini-2.5-pro 更强
+  api_key: ${GEMINI_API_KEY}              # 从环境变量读取
+  base_url:                               # 留空自动选择端点；自定义 OpenAI-compatible 时填写
 
 agent:
   max_steps: 40           # 每轮最大步数
@@ -105,7 +105,7 @@ coding-agent/
 │
 ├── tools/              # 工具层（agent 可调用的操作）
 │   ├── base.py         # BaseTool + ToolRegistry
-│   ├── file_tool.py    # 文件读写查看
+│   ├── file_tool.py    # 文件读 / 查看 / 整文件写 / 外科式编辑（file_edit）
 │   ├── shell_tool.py   # Shell 执行（四层安全防护）
 │   ├── search_tool.py  # 文本搜索 / 文件查找 / 符号定位
 │   ├── test_tool.py    # pytest 执行 + 结构化结果解析
@@ -126,7 +126,12 @@ coding-agent/
 │   ├── default.yaml    # 默认配置
 │   └── schema.py       # 配置加载与校验
 │
-├── tests/              # 376 个测试，覆盖所有模块
+├── eval/               # 评测 harness（可复现评测 + 逐组件消融）
+│   ├── harness.py      # 跑 case、抓 patch、判分、聚合指标
+│   ├── local_cases.py  # 本地合成 bug-fix 任务集（不依赖 Docker）
+│   └── run_real.py     # 用真实 LLM 跑评测，出 resolve rate
+│
+├── tests/              # 387 个测试，覆盖所有模块
 ├── smoke_test.py       # 端到端联通验证
 ├── quicksort_task.py   # 示例任务脚本
 └── USAGE.md            # 完整使用教程
@@ -137,6 +142,7 @@ coding-agent/
 ## 核心特性
 
 **多模型支持**
+- Google Gemini（默认，OpenAI-compatible 端点）
 - Anthropic Claude（原生 tool_use）
 - OpenAI、DeepSeek、Groq、Ollama（OpenAI-compatible）
 - DeepSeek R1 等不支持 function calling 的模型走文本解析 fallback
@@ -145,6 +151,10 @@ coding-agent/
 **多语言 Repo-map**
 用 tree-sitter 精确提取符号（函数、类、方法），生成 repo 摘要注入 system prompt，
 支持 Python / JavaScript / TypeScript / Go / Rust / Java / C++ / C / Ruby。
+
+**外科式文件编辑**
+`file_edit` 用唯一片段 str_replace 做定点修改，唯一性校验保证不误删无关代码——
+改已有文件时比整文件覆盖更安全、更省 token（命中 0 次或多次都拒绝并提示）。
 
 **流式输出**
 模型 thought 逐 token 实时打印，工具调用实时显示，体验接近 Claude Code。
@@ -169,6 +179,17 @@ repo 通过 bind mount 双向同步，默认断网。
 
 ---
 
+## 评测
+
+`eval/` 提供可复现评测 harness：本地合成 bug-fix 任务集（不依赖 Docker），用真实 LLM 跑出
+resolve rate，并记录 steps / steps-to-first-edit / tokens 等指标，便于跨模型对比与逐组件消融。
+
+```bash
+python -m eval.run_real --provider gemini --model gemini-2.5-flash -n 3
+```
+
+---
+
 ## 安全说明
 
 `--confirm` 模式（`run`）和 `chat` 模式默认对写操作要求确认，执行前显示：
@@ -190,7 +211,7 @@ repo 通过 bind mount 双向同步，默认断网。
 pip install -e ".[dev]"
 
 # 运行测试
-pytest                     # 全量（376 passed，7 skipped）
+pytest                     # 全量（387 passed，7 skipped）
 pytest tests/test_day3.py  # 单个文件
 
 # 可选：更多语言的 tree-sitter 支持
