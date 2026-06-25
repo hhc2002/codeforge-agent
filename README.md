@@ -1,4 +1,4 @@
-# Forge Agent
+# CodeForge Agent
 
 自主编程智能体。给它一个任务描述，它会自己探索代码库、修改文件、运行测试，直到完成。
 
@@ -90,7 +90,7 @@ context:
 ## 项目结构
 
 ```
-coding-agent/
+codeforge-agent/
 ├── agent/              # 核心：ReAct 主循环、事件日志、数据结构
 │   ├── core.py         # Agent 类，驱动整个运行循环
 │   ├── task.py         # Task / Action / Observation / RunResult 数据类
@@ -232,7 +232,7 @@ agent chat [--repo PATH] [--model MODEL] [--sandbox] [-v]
 
 # run
 agent run --task TEXT [--repo PATH] [--task-file FILE]
-          [--model MODEL] [--confirm] [--sandbox] [--no-stream] [-v]
+          [--model MODEL] [--provider NAME] [--confirm] [--sandbox] [-v]
 
 # log
 agent log list [--dir DIR]
