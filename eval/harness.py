@@ -42,6 +42,14 @@ class EvalCase:
     verify_cmd: str                # 判分命令，returncode==0 视为 resolved
     max_steps: int = 15
 
+    # ── 诊断 metadata（分桶消融用，默认空，不影响 run_case 逻辑）─────────────
+    bucket: str = ""                       # sanity | repo_map | reflection | noise ...
+    source: str = ""                       # handwritten | quixbugs | swebench-lite
+    source_id: str = ""                    # 原始 instance id / 程序名（provenance）
+    why_this_case: str = ""                # 这道题为什么存在
+    expected_capability: str = ""          # 需要 agent 的什么能力
+    expected_without_component: str = ""   # 关掉目标模块时预测的失败信号（可证伪）
+
 
 @dataclass
 class RunRecord:
@@ -54,6 +62,7 @@ class RunRecord:
     total_tokens: int
     patch_lines: int
     verify_output: str = ""
+    bucket: str = ""               # 来自 EvalCase.bucket，便于按桶聚合
 
     def to_row(self) -> str:
         ste = self.steps_to_first_edit if self.steps_to_first_edit is not None else "-"
@@ -78,8 +87,14 @@ def run_case(
     *,
     log_dir: str = "./logs/eval",
     registry_builder: Callable | None = None,
+    config_overrides: dict | None = None,
 ) -> RunRecord:
-    """在隔离工作目录里跑一条 case，返回带指标的 RunRecord。"""
+    """
+    在隔离工作目录里跑一条 case，返回带指标的 RunRecord。
+
+    config_overrides: 注入 AgentConfig 的字段覆盖（消融开关用），
+        如 {"enable_repo_map": False}。默认 None = 完整系统。
+    """
     registry = (registry_builder or _default_registry)()
 
     task = Task(
@@ -87,7 +102,10 @@ def run_case(
         repo_path=case.repo_path,
         max_steps=case.max_steps,
     )
-    agent = Agent(backend, registry, AgentConfig(max_steps=case.max_steps))
+    agent = Agent(
+        backend, registry,
+        AgentConfig(max_steps=case.max_steps, **(config_overrides or {})),
+    )
 
     # 工具默认以进程 cwd 为工作目录（复现 CLI 在仓库内运行的行为），
     # 故切到 case 工作区；日志目录先转绝对路径，避免被写进临时目录。
@@ -112,6 +130,7 @@ def run_case(
         total_tokens=result.total_tokens,
         patch_lines=len((result.patch or "").splitlines()),
         verify_output=verify_out[-500:],
+        bucket=case.bucket,
     )
 
 

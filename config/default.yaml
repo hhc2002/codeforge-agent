@@ -4,6 +4,7 @@ llm:
   api_key: ${GEMINI_API_KEY} # 在终端 export GEMINI_API_KEY=你的key
   base_url: # 留空：自动用 Gemini 的 OpenAI 兼容端点（见 llm/router.py）
   max_tokens: 8192
+  # temperature: 0   # 留空=不传，用 provider 默认；消融实验设 0 压采样噪声、保证可复现
 
 agent:
   max_steps: 40

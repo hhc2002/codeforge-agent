@@ -31,6 +31,7 @@ class LLMConfig:
     api_key: str = ""
     base_url: str = ""
     max_tokens: int = 4096
+    temperature: float | None = None     # None = 不传给 API（用 provider 默认）；消融实验设 0
 
 
 @dataclass
@@ -124,12 +125,14 @@ def _parse(data: dict[str, Any]) -> AppConfig:
     tools_raw = data.get("tools", {})
     context_raw = data.get("context", {})
 
+    temp_raw = llm_raw.get("temperature", None)
     llm = LLMConfig(
         provider=llm_raw.get("provider", "anthropic"),
         model=llm_raw.get("model", "claude-sonnet-4-5"),
         api_key=llm_raw.get("api_key", ""),
         base_url=llm_raw.get("base_url", "") or "",
         max_tokens=int(llm_raw.get("max_tokens", 4096)),
+        temperature=float(temp_raw) if temp_raw is not None else None,
     )
 
     agent = AgentCfg(

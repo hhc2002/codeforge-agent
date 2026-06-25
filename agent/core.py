@@ -94,6 +94,14 @@ class AgentConfig:
     confirm_dangerous: bool = False        # 是否对危险命令要求用户确认
     confirm_callback: object = None        # ConfirmCallback，None=跳过确认
 
+    # ── 消融开关（ablation switches）──────────────────────────────────────
+    # 默认全开 = 完整系统。每个开关都走显式分支真正绕过对应组件，
+    # 不靠"极端参数近似关闭"（那会保留组件逻辑、引入伪实验条件）。
+    enable_repo_map: bool = True        # 关 → 不 build/注入 repo-map，system prompt 用占位符
+    enable_reflection: bool = True      # 关 → 不触发 reflection 注入（工具执行/历史写入不变）
+    enable_loop_detection: bool = True  # 关 → 不做死循环检测
+    enable_token_budget: bool = True    # 关 → 跳过 token 裁剪，发送完整历史
+
 
 
 # ---------------------------------------------------------------------------
@@ -254,32 +262,34 @@ class Agent:
                 ))
 
                 # ── 6. Reflection 触发判断 ──────────────────────────────
+                # 消融：enable_reflection=False → 只跳过 reflection 注入与 log，
+                # 上面的工具执行与历史写入保持不变。
+                if self._cfg.enable_reflection:
+                    # 触发条件 A：测试工具失败
+                    if (
+                        tc.name in self._cfg.test_tool_names
+                        and not observation.is_success()
+                    ):
+                        reflect_prompt = reflection_test_failed()
+                        log.log_reflection(
+                            step=step,
+                            reason="test_failed",
+                            prompt=reflect_prompt,
+                        )
+                        history.add(LLMMessage(role="user", content=reflect_prompt))
+                        logger.debug("Reflection triggered: test_failed at step %d", step)
 
-                # 触发条件 A：测试工具失败
-                if (
-                    tc.name in self._cfg.test_tool_names
-                    and not observation.is_success()
-                ):
-                    reflect_prompt = reflection_test_failed()
-                    log.log_reflection(
-                        step=step,
-                        reason="test_failed",
-                        prompt=reflect_prompt,
-                    )
-                    history.add(LLMMessage(role="user", content=reflect_prompt))
-                    logger.debug("Reflection triggered: test_failed at step %d", step)
-
-                # 触发条件 B：连续 N 步无编辑
-                elif steps_without_edit >= self._cfg.reflection_no_edit_steps:
-                    reflect_prompt = reflection_no_edit(steps_without_edit)
-                    log.log_reflection(
-                        step=step,
-                        reason="no_edit",
-                        prompt=reflect_prompt,
-                    )
-                    history.add(LLMMessage(role="user", content=reflect_prompt))
-                    steps_without_edit = 0  # 重置计数，避免每步都触发
-                    logger.debug("Reflection triggered: no_edit at step %d", step)
+                    # 触发条件 B：连续 N 步无编辑
+                    elif steps_without_edit >= self._cfg.reflection_no_edit_steps:
+                        reflect_prompt = reflection_no_edit(steps_without_edit)
+                        log.log_reflection(
+                            step=step,
+                            reason="no_edit",
+                            prompt=reflect_prompt,
+                        )
+                        history.add(LLMMessage(role="user", content=reflect_prompt))
+                        steps_without_edit = 0  # 重置计数，避免每步都触发
+                        logger.debug("Reflection triggered: no_edit at step %d", step)
 
             elif action.action_type == ActionType.REFLECTION:
                 # LLM 主动要求 reflection（预留，当前 MockBackend 不产生）
@@ -314,23 +324,33 @@ class Agent:
         """
         schemas = self._registry.get_schemas()
 
-        # 生成 repo-map（带缓存：只在第一步生成，之后复用）
-        if not hasattr(self, "_repo_map_cache"):
-            self._repo_map_cache = repo_map.build(
-                budget=token_budget.default_plan().repo_map
-            )
+        # repo-map（带缓存：只在第一步生成，之后复用）。
+        # 消融：enable_repo_map=False → 不 build，传 None，build_system_prompt
+        # 会退回"自己去探索"的占位符，等价于没有 repo-map 组件。
+        if self._cfg.enable_repo_map:
+            if not hasattr(self, "_repo_map_cache"):
+                self._repo_map_cache = repo_map.build(
+                    budget=token_budget.default_plan().repo_map
+                )
+            repo_summary = self._repo_map_cache
+        else:
+            repo_summary = None
 
         system_content = build_system_prompt(
             repo_path=getattr(self, "_current_repo_path", "."),
             tools=schemas,
-            repo_summary=self._repo_map_cache,
+            repo_summary=repo_summary,
         )
 
-        # 裁剪历史
-        trimmed_history_dicts = token_budget.trim_history(
-            history.to_dicts(),
-            token_budget.default_plan().history,
-        )
+        # 历史裁剪。消融：enable_token_budget=False → 跳过 token 裁剪，
+        # 发送完整历史（而非"给个超大预算"近似，避免还走裁剪逻辑）。
+        if self._cfg.enable_token_budget:
+            trimmed_history_dicts = token_budget.trim_history(
+                history.to_dicts(),
+                token_budget.default_plan().history,
+            )
+        else:
+            trimmed_history_dicts = history.to_dicts()
 
         # 组装：system + 裁剪后的 history
         messages = [LLMMessage(role="system", content=system_content)]
@@ -363,6 +383,10 @@ class Agent:
         检测是否陷入死循环：最近 N 条 action 完全相同。
         比较 (tool_name, params) 元组。
         """
+        # 消融：enable_loop_detection=False → 显式关闭（不靠 window=0 近似，
+        # 那在下面的长度比较里并非安全的关闭方式）。
+        if not self._cfg.enable_loop_detection:
+            return False
         n = self._cfg.loop_detection_window
         actions = log.get_actions()
         if len(actions) < n:

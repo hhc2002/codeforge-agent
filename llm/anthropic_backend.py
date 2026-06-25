@@ -32,7 +32,13 @@ class AnthropicBackend(LLMBackend):
     - extended thinking（claude-3-7-sonnet 等支持）
     """
 
-    def __init__(self, model: str, api_key: str, max_tokens: int = 4096) -> None:
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        max_tokens: int = 4096,
+        temperature: float | None = None,
+    ) -> None:
         try:
             import anthropic as _anthropic
             self._client = _anthropic.Anthropic(api_key=api_key)
@@ -41,6 +47,7 @@ class AnthropicBackend(LLMBackend):
 
         self._model = model
         self._max_tokens = max_tokens
+        self._temperature = temperature
 
     @property
     def model_name(self) -> str:
@@ -75,6 +82,9 @@ class AnthropicBackend(LLMBackend):
             kwargs["system"] = system_content
         if api_tools:
             kwargs["tools"] = api_tools
+        # 只在显式设了 temperature 时才传（与 OpenAI-compat 路径一致）
+        if self._temperature is not None:
+            kwargs["temperature"] = self._temperature
 
         logger.debug(
             "Anthropic request: model=%s messages=%d tools=%d",

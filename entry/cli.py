@@ -236,6 +236,7 @@ def run(
             "api_key":  config.llm.api_key or None,
             "base_url": config.llm.base_url or None,
             "max_tokens": config.llm.max_tokens,
+            "temperature": config.llm.temperature,
         })
     except ValueError as e:
         click.echo(red(f"Error: {e}"), err=True)
@@ -365,6 +366,7 @@ def chat(
             "api_key":    config.llm.api_key or None,
             "base_url":   config.llm.base_url or None,
             "max_tokens": config.llm.max_tokens,
+            "temperature": config.llm.temperature,
         })
     except ValueError as e:
         click.echo(red(f"Error: {e}"), err=True)

@@ -49,6 +49,8 @@ class OpenAICompatBackend(LLMBackend):
         api_key: str,
         base_url: str | None = None,
         max_tokens: int = 4096,
+        temperature: float | None = None,
+        extra_body: dict[str, Any] | None = None,
     ) -> None:
         try:
             from openai import OpenAI
@@ -58,9 +60,28 @@ class OpenAICompatBackend(LLMBackend):
 
         self._model = model
         self._max_tokens = max_tokens
+        self._temperature = temperature
+        # extra_body：透传给 API 的额外 JSON 字段。例如 DeepSeek v4 默认开思考模式，
+        # 而思考模式不支持 tool_choice="required"，需 {"thinking": {"type": "disabled"}}。
+        self._extra_body = extra_body
         self._use_function_calling = not any(
             model.lower().startswith(prefix) for prefix in _NO_FUNCTION_CALLING
         )
+
+    def _sampling_params(self) -> dict[str, Any]:
+        """
+        统一注入采样及额外请求参数，所有 API 调用路径
+        （complete / stream，function-calling / text）都经此，确保各路径一致、
+        不会变成两套实验条件。
+        - temperature：仅在显式设置时传（某些兼容端点对默认参数敏感）。
+        - extra_body：provider 特定的额外字段（如 DeepSeek 关思考）。
+        """
+        params: dict[str, Any] = {}
+        if self._temperature is not None:
+            params["temperature"] = self._temperature
+        if self._extra_body:
+            params["extra_body"] = self._extra_body
+        return params
 
     @property
     def model_name(self) -> str:
@@ -108,6 +129,7 @@ class OpenAICompatBackend(LLMBackend):
             # required：强制每轮必须调用一个工具（含显式 finish/give_up），
             # 杜绝模型只输出文字计划被误判为任务完成。
             tool_choice="required",
+            **self._sampling_params(),
         )
 
         choice = response.choices[0]
@@ -153,6 +175,7 @@ class OpenAICompatBackend(LLMBackend):
             model=self._model,
             max_tokens=self._max_tokens,
             messages=augmented,
+            **self._sampling_params(),
         )
 
         choice = response.choices[0]
@@ -406,6 +429,7 @@ def _stream_with_tools(self, api_messages, tools, on_text, on_thought=None):
         max_tokens=self._max_tokens,
         messages=api_messages,
         stream=True,
+        **self._sampling_params(),
     )
     if api_tools:
         kwargs["tools"] = api_tools
@@ -518,6 +542,7 @@ def _stream_text_only(self, api_messages, tools, on_text):
         max_tokens=self._max_tokens,
         messages=augmented,
         stream=True,
+        **self._sampling_params(),
     )
     for chunk in stream:
         choice = chunk.choices[0] if chunk.choices else None

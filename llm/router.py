@@ -46,6 +46,7 @@ def create_backend(
     api_key: str | None = None,
     base_url: str | None = None,
     max_tokens: int = 4096,
+    temperature: float | None = None,
 ) -> LLMBackend:
     """
     工厂函数，根据 provider 创建对应的 LLMBackend。
@@ -56,6 +57,8 @@ def create_backend(
         api_key:    API key，None 时从环境变量读取
         base_url:   覆盖默认 base_url（通常不需要手动传）
         max_tokens: 最大输出 token 数
+        temperature: 采样温度。None=不传给 API（用 provider 默认）；
+                     消融实验设 0 以压低采样噪声、保证可复现。
 
     Returns:
         对应的 LLMBackend 实例
@@ -89,6 +92,7 @@ def create_backend(
             model=model,
             api_key=resolved_key,
             max_tokens=max_tokens,
+            temperature=temperature,
         )
 
     # 所有 OpenAI-compatible providers
@@ -97,11 +101,19 @@ def create_backend(
     # base_url 优先级：调用方显式传入 > provider 默认值
     resolved_base_url = base_url or _PROVIDER_BASE_URLS[provider]
 
+    # DeepSeek v4（flash/pro）默认开思考模式，与 agent 的 tool_choice="required" 冲突
+    # （API 报 "Thinking mode does not support this tool_choice"）。关掉思考即可。
+    extra_body = None
+    if provider == "deepseek" and model.lower().startswith("deepseek-v4"):
+        extra_body = {"thinking": {"type": "disabled"}}
+
     return OpenAICompatBackend(
         model=model,
         api_key=resolved_key,
         base_url=resolved_base_url,
         max_tokens=max_tokens,
+        temperature=temperature,
+        extra_body=extra_body,
     )
 
 
@@ -115,11 +127,14 @@ def create_backend_from_config(config: dict) -> LLMBackend:
         api_key: sk-...        # 可选，缺省读环境变量
         base_url:              # 可选
         max_tokens: 4096       # 可选
+        temperature:           # 可选，缺省 None=不传给 API
     """
+    temp = config.get("temperature")
     return create_backend(
         provider=config.get("provider", "anthropic"),
         model=config.get("model", "claude-sonnet-4-5"),
         api_key=config.get("api_key") or None,
         base_url=config.get("base_url") or None,
         max_tokens=int(config.get("max_tokens", 4096)),
+        temperature=float(temp) if temp is not None else None,
     )

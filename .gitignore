@@ -8,3 +8,8 @@ __pycache__/
 # editor / local-only
 *.code-workspace
 应用算法_改造与实验方案.md
+
+# secrets — never commit API keys
+.secrets.env
+.env
+.env.local
