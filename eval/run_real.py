@@ -11,6 +11,7 @@ eval/run_real.py
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from llm.router import create_backend
@@ -20,8 +21,8 @@ from eval.local_cases import build_local_cases
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--provider", default="gemini")
-    ap.add_argument("--model", default="gemini-2.5-flash")
+    ap.add_argument("--provider", default=os.environ.get("FORGE_PROVIDER", "deepseek"))
+    ap.add_argument("--model", default=os.environ.get("FORGE_MODEL", "deepseek-v4-flash"))
     ap.add_argument("-n", type=int, default=3, help="跑几个 case")
     args = ap.parse_args()
 

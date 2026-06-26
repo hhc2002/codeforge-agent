@@ -39,6 +39,7 @@ class ActionType(str, Enum):
     REFLECTION  = "reflection"   # 触发自我反思
     FINISH      = "finish"       # 宣布任务完成
     GIVE_UP     = "give_up"      # 超出能力范围，主动放弃
+    NO_OP       = "no_op"        # 模型只输出文字、没发 tool_call（auto 模式常见，需 nudge）
 
 
 class ObservationStatus(str, Enum):

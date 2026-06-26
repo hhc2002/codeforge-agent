@@ -94,6 +94,13 @@ class AgentConfig:
     confirm_dangerous: bool = False        # 是否对危险命令要求用户确认
     confirm_callback: object = None        # ConfirmCallback，None=跳过确认
 
+    # 防"空 finish"：没有任何代码改动就声称完成（auto/推理模型常见——在 reasoning
+    # 里把解法想了一遍却没落到 file_edit）。开启后退回并要求先编辑，最多退回 N 次。
+    # 默认关（保留 chat/问答类无改动 finish 的合法性），SWE-bench 等修复任务由调用方开启。
+    require_edit_before_finish: bool = False
+    max_empty_finishes: int = 3
+    max_no_ops: int = 5                     # 模型连续不发 tool_call 多少次后放弃
+
     # ── 消融开关（ablation switches）──────────────────────────────────────
     # 默认全开 = 完整系统。每个开关都走显式分支真正绕过对应组件，
     # 不靠"极端参数近似关闭"（那会保留组件逻辑、引入伪实验条件）。
@@ -143,7 +150,10 @@ class Agent:
             RunResult，包含最终状态和统计信息
         """
         self._current_repo_path = task.repo_path
-        # 按 repo_path 隔离 repo_map 缓存，换 repo 时自动重建
+        self._task_query = task.description   # 喂给 repo-map 做任务相关性排序
+        # 按 repo_path 隔离 repo_map 缓存（换 repo 重建；chat 多轮同 repo 复用，
+        # 只用首轮 query 做相关性，可接受。SWE-bench 每实例是独立 worktree 路径 +
+        # 新建 Agent，天然各自重建，不会串用别题的 query）。
         cache_key = task.repo_path
         if getattr(self, "_repo_map_cache_key", None) != cache_key:
             if hasattr(self, "_repo_map_cache"):
@@ -170,6 +180,8 @@ class Agent:
 
         total_tokens = 0
         steps_without_edit = 0
+        empty_finishes = 0
+        no_ops = 0
 
         for step in range(1, task.max_steps + 1):
             logger.debug("Step %d/%d", step, task.max_steps)
@@ -216,6 +228,25 @@ class Agent:
             if action.action_type == ActionType.FINISH:
                 summary = action.message or "Task complete."
                 patch = self._get_git_diff(task.repo_path)
+                # 护栏：零改动的 finish 多半是"想完了没动手"。退回要求先编辑，
+                # 而不是接受空补丁；超过上限才放行（交给后续判分判失败）。
+                if (
+                    self._cfg.require_edit_before_finish
+                    and not (patch and patch.strip())
+                    and empty_finishes < self._cfg.max_empty_finishes
+                ):
+                    empty_finishes += 1
+                    nudge = (
+                        "You called finish but the working tree has no changes "
+                        "(git diff is empty). You cannot resolve the issue without "
+                        "editing files. Locate the cause and apply a concrete edit "
+                        "with file_edit/file_write, then finish."
+                    )
+                    history.add(LLMMessage(role="assistant",
+                                           content=self._format_action_for_history(action)))
+                    history.add(LLMMessage(role="user", content=nudge))
+                    logger.info("Rejected empty finish #%d at step %d", empty_finishes, step)
+                    continue
                 log.log_task_complete(steps=step, summary=summary)
                 return RunResult(
                     task_id=task.task_id,
@@ -237,8 +268,36 @@ class Agent:
                     total_tokens=total_tokens,
                 )
 
+            # ── 4b. NO_OP：模型只输出文字没发 tool_call ─────────────────
+            # （tool_choice="auto" + 思考模型常见）。nudge 它去调工具并继续；
+            # 反复 nudge 仍不调，超过上限就诚实 give_up，不当成功。
+            if action.action_type == ActionType.NO_OP:
+                no_ops += 1
+                if no_ops > self._cfg.max_no_ops:
+                    reason = f"Model produced no tool call {no_ops} times; giving up."
+                    log.log_task_failed(steps=step, reason=reason)
+                    return RunResult(
+                        task_id=task.task_id,
+                        status=RunStatus.GAVE_UP,
+                        summary=reason,
+                        steps_taken=step,
+                        total_tokens=total_tokens,
+                    )
+                nudge = (
+                    "Your last reply contained no tool call, so nothing happened. "
+                    "You must respond with a tool call to act: file_view to inspect, "
+                    "file_edit/file_write to change code, test to run tests, "
+                    "or finish when the fix is complete. Issue a tool call now."
+                )
+                if action.message:
+                    history.add(LLMMessage(role="assistant", content=action.message))
+                history.add(LLMMessage(role="user", content=nudge))
+                logger.info("NO_OP nudge #%d at step %d", no_ops, step)
+                continue
+
             # ── 5. 执行工具 ─────────────────────────────────────────────
             if action.action_type == ActionType.TOOL_CALL and action.tool_call:
+                no_ops = 0   # 连续计数：调到工具就清零，散落的 NO_OP 不累计成 give_up
                 tc = action.tool_call
                 result = self._registry.execute_tool(tc.name, tc.params)
                 observation = result.to_observation(tc.name)
@@ -330,7 +389,8 @@ class Agent:
         if self._cfg.enable_repo_map:
             if not hasattr(self, "_repo_map_cache"):
                 self._repo_map_cache = repo_map.build(
-                    budget=token_budget.default_plan().repo_map
+                    budget=token_budget.default_plan().repo_map,
+                    query=getattr(self, "_task_query", ""),
                 )
             repo_summary = self._repo_map_cache
         else:

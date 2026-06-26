@@ -51,6 +51,7 @@ class OpenAICompatBackend(LLMBackend):
         max_tokens: int = 4096,
         temperature: float | None = None,
         extra_body: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         try:
             from openai import OpenAI
@@ -64,6 +65,12 @@ class OpenAICompatBackend(LLMBackend):
         # extra_body：透传给 API 的额外 JSON 字段。例如 DeepSeek v4 默认开思考模式，
         # 而思考模式不支持 tool_choice="required"，需 {"thinking": {"type": "disabled"}}。
         self._extra_body = extra_body
+        self._reasoning_effort = reasoning_effort
+        # tool_choice：默认 required（强制每轮调一个工具）。但思考模式不支持 required，
+        # 故当 extra_body 显式开启 thinking 时降为 "auto"。
+        self._tool_choice = "required"
+        if extra_body and extra_body.get("thinking", {}).get("type") == "enabled":
+            self._tool_choice = "auto"
         self._use_function_calling = not any(
             model.lower().startswith(prefix) for prefix in _NO_FUNCTION_CALLING
         )
@@ -79,6 +86,8 @@ class OpenAICompatBackend(LLMBackend):
         params: dict[str, Any] = {}
         if self._temperature is not None:
             params["temperature"] = self._temperature
+        if self._reasoning_effort:
+            params["reasoning_effort"] = self._reasoning_effort
         if self._extra_body:
             params["extra_body"] = self._extra_body
         return params
@@ -128,13 +137,17 @@ class OpenAICompatBackend(LLMBackend):
             tools=api_tools,
             # required：强制每轮必须调用一个工具（含显式 finish/give_up），
             # 杜绝模型只输出文字计划被误判为任务完成。
-            tool_choice="required",
+            # 思考模式不支持 required，此时 self._tool_choice 已降为 "auto"。
+            tool_choice=self._tool_choice,
             **self._sampling_params(),
         )
 
         choice = response.choices[0]
         message = choice.message
-        thought = message.content or "(no thought)"
+        # 推理模型（DeepSeek 思考模式等）把链路放在 reasoning_content，最终答案才在 content。
+        # 强制工具调用时 content 常为空，故 content 缺失时回落到 reasoning_content，
+        # 修掉日志里清一色 "(no thought)"。
+        thought = message.content or getattr(message, "reasoning_content", None) or "(no thought)"
 
         logger.debug(
             "OpenAI-compat response: finish_reason=%s input=%d output=%d",
@@ -258,16 +271,13 @@ def _parse_openai_response(choice: Any, thought: str) -> Action:
         )
 
     if finish_reason == "stop":
-        if thought and thought != "(no thought)":
-            return Action(
-                action_type=ActionType.FINISH,
-                thought="",      # 普通 chat 模型没有独立推理链，thought 置空
-                message=thought,  # 模型输出的内容就是最终回答
-            )
+        # function-calling 路径下 stop 但没有 tool_call：模型只是输出了文字/推理、
+        # 忘了发工具调用（tool_choice="auto" + 思考模型常见）。这**不是**完成——
+        # 之前误判成 FINISH 会让"光说不练"被当成功。返回 NO_OP，由循环 nudge 它去调工具。
         return Action(
-            action_type=ActionType.GIVE_UP,
+            action_type=ActionType.NO_OP,
             thought=thought,
-            message="Model stopped with no content",
+            message=thought if thought and thought != "(no thought)" else "",
         )
 
     # length（token 超限）或其他

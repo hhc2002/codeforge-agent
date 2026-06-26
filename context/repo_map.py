@@ -80,6 +80,42 @@ _SYMBOL_RE = re.compile(
     re.MULTILINE,
 )
 
+# 单文件在 repo-map 里最多列几个顶层符号（防止巨型文件刷屏）
+_MAX_SYMS_PER_FILE = 12
+
+
+def _is_noise_name(name: str) -> bool:
+    """对 map 无信息量的符号名：dispatch 用的裸 `_`、dunder。
+    sympy 里大量 `def _(...)` 多分派函数，列出来纯噪声。"""
+    return name == "_" or name.startswith("__")
+
+
+# 从 issue/task 文本里抽"被提到的标识符"，用于任务相关性排序：
+#   反引号包裹的 `foo_bar` / 点号路径取末段；snake_case；CamelCase。
+_BACKTICK_RE = re.compile(r"`([A-Za-z_][\w.]*)`")
+_SNAKE_RE = re.compile(r"\b([a-z_][a-z0-9_]{3,})\b")
+_CAMEL_RE = re.compile(r"\b([A-Z][a-zA-Z0-9]{3,})\b")
+# snake_case 常见英文词，命中了也不算"标识符信号"，过滤掉减少噪声
+_STOPWORDS = frozenset({
+    "should", "would", "could", "which", "there", "where", "when", "this",
+    "that", "with", "from", "have", "does", "doesn", "what", "your", "into",
+    "return", "returns", "result", "error", "raise", "raises", "value", "values",
+    "expected", "example", "following", "above", "below", "instead", "because",
+})
+
+
+def extract_query_idents(text: str) -> set[str]:
+    """从任务描述里抽候选标识符（用于把相关文件顶到 map 顶部）。"""
+    if not text:
+        return set()
+    idents: set[str] = set()
+    for m in _BACKTICK_RE.findall(text):
+        idents.add(m)
+        idents.add(m.split(".")[-1])           # `a.b.c` 取末段
+    idents.update(_CAMEL_RE.findall(text))
+    idents.update(w for w in _SNAKE_RE.findall(text) if w not in _STOPWORDS)
+    return {i for i in idents if len(i) >= 4}
+
 # 已加载的 tree-sitter Language 对象缓存（避免重复 import）
 _lang_cache: dict[str, object] = {}   # ext → Language or None
 
@@ -123,6 +159,7 @@ class Symbol:
     line: int
     file: Path
     indent: int = 0
+    signature: str = ""  # 源码里的定义行（如 "def foo(self, x):"），渲染用
 
     @property
     def is_toplevel(self) -> bool:
@@ -141,9 +178,19 @@ class FileInfo:
         return str(self.path)
 
     def importance_score(self) -> float:
-        top_level = sum(1 for s in self.symbols if s.is_toplevel)
-        size_penalty = self.size / 10_000
-        return top_level - size_penalty
+        # 旧实现 = 顶层符号数 − size/10000，奖励"符号多"→ 测试文件 / 机器生成的巨型
+        # 文件（如 sympy 的 rubi 积分规则，几百个符号）霸榜，真源文件沉底。
+        # 修正：① 符号数封顶（巨型文件不能靠数量取胜）；② 加重大小惩罚；
+        #       ③ 测试文件大幅降权（要改 bug 的几乎都不是 test_*.py）。
+        top_level = sum(1 for s in self.symbols
+                        if s.is_toplevel and not _is_noise_name(s.name))
+        score = min(top_level, 15) - self.size / 20_000
+        p = self.rel_path.replace("\\", "/").lower()
+        if "/test" in p or p.startswith("test") or "conftest" in p:
+            score -= 100
+        if "/bench" in p or "benchmark" in p:    # 基准测试也不是要改的源码
+            score -= 100
+        return score
 
 
 # ---------------------------------------------------------------------------
@@ -162,27 +209,39 @@ class RepoMap:
     def __init__(self, repo_path: str | Path) -> None:
         self._root = Path(repo_path).resolve()
 
-    def build(self, budget: int = 8000) -> str:
+    def build(self, budget: int = 8000, query: str = "") -> str:
         files = self._scan()
         if not files:
             return "(empty repository)"
 
-        files.sort(key=lambda f: f.importance_score(), reverse=True)
+        idents = extract_query_idents(query)
+        # 排序键：先按"任务相关性"（命中 issue 标识符的文件顶到最前），再按静态
+        # 重要性兜底。query 为空时 relevance 恒 0，退化为纯重要性排序（向后兼容）。
+        files.sort(
+            key=lambda f: (self._relevance(f, idents), f.importance_score()),
+            reverse=True,
+        )
 
         lines: list[str] = []
         char_count = 0
         max_chars = budget * 4
+        shown = 0
 
         for fi in files:
-            block = self._format_file(fi)
+            block = self._format_file(fi, idents)
+            # skip 不 break：装不下就跳过这个文件继续试更小的，
+            # 杜绝"第一个超大文件就清空整张表"（旧 break 的 bug）。
             if char_count + len(block) > max_chars:
-                remaining = len(files) - files.index(fi)
-                lines.append(f"... ({remaining} more files not shown)")
-                break
+                continue
             lines.append(block)
             char_count += len(block)
+            shown += 1
 
-        return "\n".join(lines)
+        omitted = len(files) - shown
+        if omitted > 0:
+            lines.append(f"... ({omitted} more files not shown)")
+
+        return "".join(lines)   # 每个 block 自带换行
 
     def _scan(self) -> list[FileInfo]:
         results: list[FileInfo] = []
@@ -208,20 +267,46 @@ class RepoMap:
             results.append(fi)
         return results
 
-    def _format_file(self, fi: FileInfo) -> str:
-        sym_count = len(fi.symbols)
-        header = f"{fi.rel_path}"
-        if sym_count:
-            header += f" ({sym_count} symbol{'s' if sym_count != 1 else ''})"
+    def _relevance(self, fi: FileInfo, idents: set[str]) -> int:
+        """文件与当前任务的相关性：符号名命中 issue 标识符（权重最高）+ 路径命中。"""
+        if not idents:
+            return 0
+        names = {s.name for s in fi.symbols}
+        score = len(names & idents) * 3
+        parts = set(re.split(r"[/_.]", fi.rel_path.lower()))
+        score += len(parts & {i.lower() for i in idents})
+        return score
 
-        if not fi.symbols:
-            return header + "\n"
+    def _format_file(self, fi: FileInfo, idents: set[str]) -> str:
+        # 借鉴 Aider：显示真实**签名行**（含参数）而非裸名，保留类-方法嵌套。
+        # 取舍（防回到旧的 60× 膨胀）：每文件**封顶 _MAX_SYMS_PER_FILE 个符号**，
+        # 且 query 命中的符号**必显示、优先**（哪怕是方法）——保证 agent 直接看到
+        # 该改的那个函数；其余按顶层补足。
+        syms = [s for s in fi.symbols if not _is_noise_name(s.name)]
+        if not syms:
+            return f"{fi.rel_path}\n"
 
-        sym_lines = [header + ":"]
-        for sym in fi.symbols:
-            prefix = "    " if not sym.is_toplevel else "  "
-            sym_lines.append(f"{prefix}{sym.kind} {sym.name} (line {sym.line})")
-        return "\n".join(sym_lines) + "\n"
+        matched = [s for s in syms if s.name in idents]      # 命中 issue 的符号
+        toplevel = [s for s in syms if s.is_toplevel]
+        picked: list[Symbol] = []
+        seen: set[tuple[str, int]] = set()
+        for s in matched + toplevel:                          # 命中优先，再补顶层
+            key = (s.name, s.line)
+            if key not in seen:
+                seen.add(key)
+                picked.append(s)
+            if len(picked) >= _MAX_SYMS_PER_FILE:
+                break
+        picked.sort(key=lambda s: s.line)                     # 按行号还原结构顺序
+
+        out = [f"{fi.rel_path}:"]
+        for s in picked:
+            indent = "    " if s.is_toplevel else "        "   # 方法多缩进一层
+            out.append(indent + (s.signature or f"{s.kind} {s.name}"))
+        omitted = len(syms) - len(picked)
+        if omitted > 0:
+            out.append(f"    ... (+{omitted} more)")
+        return "\n".join(out) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -234,8 +319,16 @@ def _extract_symbols(content: str, filepath: Path, ext: str) -> list[Symbol]:
     """
     lang = _get_language(ext)
     if lang is not None:
-        return _extract_with_treesitter(content, filepath, lang)
-    return _extract_symbols_regex(content, filepath)
+        syms = _extract_with_treesitter(content, filepath, lang)
+    else:
+        syms = _extract_symbols_regex(content, filepath)
+    # 回填签名行：用行号取源码定义行（"def foo(self, x):" / "class Bar:"），
+    # 渲染时显示真实签名而非裸名（借鉴 Aider）。截到 120 字符防超长。
+    src_lines = content.splitlines()
+    for s in syms:
+        if 1 <= s.line <= len(src_lines):
+            s.signature = src_lines[s.line - 1].strip()[:120]
+    return syms
 
 
 def _extract_with_treesitter(content: str, filepath: Path, lang) -> list[Symbol]:

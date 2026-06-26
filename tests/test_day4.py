@@ -328,13 +328,15 @@ class TestOpenAICompatBackend:
         assert result.action.tool_call.name == "shell"
         assert result.action.tool_call.params == {"cmd": "pytest"}
 
-    def test_stop_response_is_finish(self):
+    def test_stop_without_toolcall_is_no_op(self):
+        # FC 路径下 stop 但没有 tool_call = 模型只输出文字、没调工具
+        # （tool_choice="auto" + 思考模型常见）。不是完成，应为 NO_OP，由循环 nudge。
         backend = self._make_backend()
-        response = self._make_response("stop", content="Task is done.")
+        response = self._make_response("stop", content="Let me look at the code.")
         backend._client.chat.completions.create.return_value = response
 
         result = backend.complete(make_messages("user", "fix it"), [])
-        assert result.action.action_type == ActionType.FINISH
+        assert result.action.action_type == ActionType.NO_OP
 
     def test_length_finish_reason_is_give_up(self):
         backend = self._make_backend()

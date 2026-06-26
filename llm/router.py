@@ -47,6 +47,7 @@ def create_backend(
     base_url: str | None = None,
     max_tokens: int = 4096,
     temperature: float | None = None,
+    reasoning_effort: str | None = None,
 ) -> LLMBackend:
     """
     工厂函数，根据 provider 创建对应的 LLMBackend。
@@ -101,11 +102,18 @@ def create_backend(
     # base_url 优先级：调用方显式传入 > provider 默认值
     resolved_base_url = base_url or _PROVIDER_BASE_URLS[provider]
 
-    # DeepSeek v4（flash/pro）默认开思考模式，与 agent 的 tool_choice="required" 冲突
-    # （API 报 "Thinking mode does not support this tool_choice"）。关掉思考即可。
+    resolved_effort = reasoning_effort or os.environ.get("FORGE_REASONING_EFFORT") or None
+
+    # DeepSeek v4（flash/pro）：默认开思考 + reasoning_effort=high（本项目定的唯一配置）。
+    # 思考模式不支持 tool_choice="required"（API 400），OpenAICompatBackend 会自动把
+    # tool_choice 降为 "auto" —— 这是 API 限制下的内部后果，不是可选模式。
+    # FORGE_DS_THINKING=disabled 仅留作排查用的逃生阀。
     extra_body = None
     if provider == "deepseek" and model.lower().startswith("deepseek-v4"):
-        extra_body = {"thinking": {"type": "disabled"}}
+        mode = (os.environ.get("FORGE_DS_THINKING") or "enabled").lower()
+        extra_body = {"thinking": {"type": mode}}
+        if mode == "enabled" and not resolved_effort:
+            resolved_effort = "high"
 
     return OpenAICompatBackend(
         model=model,
@@ -114,6 +122,7 @@ def create_backend(
         max_tokens=max_tokens,
         temperature=temperature,
         extra_body=extra_body,
+        reasoning_effort=resolved_effort,
     )
 
 

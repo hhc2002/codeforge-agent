@@ -120,6 +120,83 @@ class TestRepoMap:
         result = rm.build()
         assert "big.py" not in result
 
+    # ── 回归：repo-map 在大库上吐空的三个 bug ────────────────────────────
+    def test_huge_symbol_file_does_not_empty_map(self, tmp_path):
+        # 旧 bug：一个符号海量的文件 block 超预算 → break → 整张 map 空。
+        # 现在它压成一行，不该再吃光预算；同库的目标小文件必须仍出现。
+        (tmp_path / "huge.py").write_text(
+            "".join(f"def f{i}():\n    pass\n" for i in range(3000))
+        )
+        (tmp_path / "target.py").write_text("def fix_me():\n    pass\n")
+        result = RepoMap(tmp_path).build(budget=2000)
+        assert "target.py" in result
+        assert "empty" not in result.lower()
+        assert "fix_me" in result
+
+    def test_file_symbols_are_capped(self, tmp_path):
+        # 防 60× 膨胀：含很多符号的文件最多渲染 _MAX_SYMS_PER_FILE 个签名行，
+        # 余下记 "+N more"，而不是把几百个符号全 dump（那是旧 bug 的根因）。
+        from context.repo_map import _MAX_SYMS_PER_FILE
+        (tmp_path / "many.py").write_text(
+            "".join(f"def g{i}():\n    pass\n" for i in range(100))
+        )
+        result = RepoMap(tmp_path).build(budget=10_000)
+        # many.py 的 block：header(1) + 封顶签名(≤MAX) + "+N more"(1)
+        block_lines = [l for l in result.splitlines()
+                       if l.startswith("many.py") or l.strip().startswith("def g")
+                       or l.strip().startswith("...")]
+        assert sum(1 for l in result.splitlines() if l.strip().startswith("def g")) <= _MAX_SYMS_PER_FILE
+        assert "more" in result
+
+    def test_shows_real_signature_lines(self, tmp_path):
+        # 借鉴 Aider：显示真实签名行（含参数），而非裸名。
+        (tmp_path / "m.py").write_text(
+            "class Foo:\n    def bar(self, x, y):\n        pass\n\ndef baz(a):\n    pass\n"
+        )
+        result = RepoMap(tmp_path).build(budget=10_000)
+        assert "def baz(a):" in result          # 真实签名，带参数
+        assert "class Foo:" in result
+
+    def test_skip_not_break_keeps_smaller_files(self, tmp_path):
+        # skip 不 break：排在前面的大文件装不下时跳过它，后面的小文件仍要进 map。
+        (tmp_path / "big.py").write_text(
+            "".join(f"def {'x'*30}_{i}():\n    pass\n" for i in range(12))  # 一行很长
+        )
+        (tmp_path / "s.py").write_text("def t():\n    pass\n")             # 很短
+        result = RepoMap(tmp_path).build(budget=15)   # 仅 60 字符，放不下 big 的长行
+        assert "s.py" in result        # 小文件没被 break 掉
+        assert "big.py" not in result  # 长行被跳过
+
+    def test_test_files_ranked_below_source(self, tmp_path):
+        # 排序：同样符号数，测试文件应排在源文件之后（不再霸榜）。
+        (tmp_path / "core.py").write_text("def a():\n    pass\ndef b():\n    pass\n")
+        tests = tmp_path / "tests"; tests.mkdir()
+        (tests / "test_core.py").write_text("def a():\n    pass\ndef b():\n    pass\n")
+        result = RepoMap(tmp_path).build(budget=10_000)
+        assert result.index("core.py") < result.index("test_core.py")
+
+    def test_query_relevance_floats_target_to_top(self, tmp_path):
+        # 任务相关性：query 提到某符号，定义它的文件应被顶到 map 最前，
+        # 即使它本身符号少、排不到前面。
+        # 一堆"重要"但无关的文件（符号多）
+        for i in range(20):
+            (tmp_path / f"big{i}.py").write_text(
+                "".join(f"def h{j}():\n    pass\n" for j in range(10))
+            )
+        # 目标文件：符号少，但定义了 issue 提到的函数
+        (tmp_path / "target.py").write_text("def collect_factor_and_dimension():\n    pass\n")
+        issue = "collect_factor_and_dimension does not detect equivalent dimensions"
+        result = RepoMap(tmp_path).build(budget=10_000, query=issue)
+        first_line = result.splitlines()[0]
+        assert first_line.startswith("target.py")
+
+    def test_no_query_is_backward_compatible(self, tmp_path):
+        # 不给 query 时排序退化为纯重要性，行为不变。
+        (tmp_path / "a.py").write_text("def foo():\n    pass\n")
+        r1 = RepoMap(tmp_path).build(budget=10_000)
+        r2 = RepoMap(tmp_path).build(budget=10_000, query="")
+        assert r1 == r2
+
 
 class TestExtractPythonSymbols:
     def test_extracts_function(self, tmp_path):

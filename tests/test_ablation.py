@@ -35,7 +35,7 @@ class _FakeRepoMap:
     def __init__(self) -> None:
         self.build_calls = 0
 
-    def build(self, budget: int | None = None) -> str:
+    def build(self, budget: int | None = None, query: str = "") -> str:
         self.build_calls += 1
         return self.SENTINEL
 
@@ -235,15 +235,26 @@ class TestTemperaturePlumbing:
 
 
 class TestDeepSeekThinkingDisable:
-    """DeepSeek v4 默认开思考、与 tool_choice='required' 冲突，需自动关思考。"""
+    """DeepSeek v4 默认开思考 + reasoning_effort=high；思考模式不支持 tool_choice=
+    'required'，故 tool_choice 自动降为 'auto'。FORGE_DS_THINKING=disabled 为逃生阀。"""
 
-    def test_v4_flash_disables_thinking(self):
+    def test_v4_flash_enables_thinking_by_default(self, monkeypatch):
         pytest.importorskip("openai")
+        monkeypatch.delenv("FORGE_DS_THINKING", raising=False)
+        monkeypatch.delenv("FORGE_REASONING_EFFORT", raising=False)
+        from llm.router import create_backend
+        b = create_backend(provider="deepseek", model="deepseek-v4-flash", api_key="x")
+        assert b._extra_body == {"thinking": {"type": "enabled"}}
+        assert b._sampling_params()["reasoning_effort"] == "high"
+        assert b._tool_choice == "auto"   # 思考模式下 required 不可用，自动降级
+
+    def test_v4_flash_thinking_can_be_disabled_via_env(self, monkeypatch):
+        pytest.importorskip("openai")
+        monkeypatch.setenv("FORGE_DS_THINKING", "disabled")
         from llm.router import create_backend
         b = create_backend(provider="deepseek", model="deepseek-v4-flash", api_key="x")
         assert b._extra_body == {"thinking": {"type": "disabled"}}
-        # extra_body 必须经 _sampling_params 注入到每个 API 调用
-        assert b._sampling_params()["extra_body"] == {"thinking": {"type": "disabled"}}
+        assert b._tool_choice == "required"
 
     def test_non_v4_no_extra_body(self):
         pytest.importorskip("openai")

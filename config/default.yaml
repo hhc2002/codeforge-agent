@@ -1,10 +1,14 @@
 llm:
-  provider: gemini
-  model: gemini-2.5-flash # 稳定可用；gemini-3.5-flash 当前常 503，可用 -m 临时切
-  api_key: ${GEMINI_API_KEY} # 在终端 export GEMINI_API_KEY=你的key
-  base_url: # 留空：自动用 Gemini 的 OpenAI 兼容端点（见 llm/router.py）
+  # 一行切模型：export FORGE_PROVIDER=... FORGE_MODEL=...（env 优先于此处 yaml）
+  provider: deepseek
+  model: deepseek-v4-flash # ds 消融主力；export FORGE_MODEL=deepseek-chat 等可临时切
+  api_key: ${DEEPSEEK_API_KEY} # 在终端 export DEEPSEEK_API_KEY=你的key
+  base_url: # 留空：deepseek 自动用 https://api.deepseek.com（见 llm/router.py）
   max_tokens: 8192
   # temperature: 0   # 留空=不传，用 provider 默认；消融实验设 0 压采样噪声、保证可复现
+  # deepseek-v4 默认即「思考 on + reasoning_effort=high」（见 llm/router.py）；
+  # 思考模式下 tool_choice 自动用 auto（API 不允许 required+thinking）。
+  # FORGE_DS_THINKING=disabled 仅排查用。
 
 agent:
   max_steps: 40

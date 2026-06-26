@@ -127,8 +127,9 @@ def _parse(data: dict[str, Any]) -> AppConfig:
 
     temp_raw = llm_raw.get("temperature", None)
     llm = LLMConfig(
-        provider=llm_raw.get("provider", "anthropic"),
-        model=llm_raw.get("model", "claude-sonnet-4-5"),
+        # FORGE_PROVIDER / FORGE_MODEL 环境变量优先于 yaml，便于一行切模型
+        provider=os.environ.get("FORGE_PROVIDER") or llm_raw.get("provider", "anthropic"),
+        model=os.environ.get("FORGE_MODEL") or llm_raw.get("model", "claude-sonnet-4-5"),
         api_key=llm_raw.get("api_key", ""),
         base_url=llm_raw.get("base_url", "") or "",
         max_tokens=int(llm_raw.get("max_tokens", 4096)),
